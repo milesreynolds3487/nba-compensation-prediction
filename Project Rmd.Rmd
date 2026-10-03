@@ -1,0 +1,623 @@
+---
+title: "Predicting NBA Player Salaries"
+subtitle: "Using Machine Learning Models to Predict Player Salary from Performance Data"
+author: "Miles Reynolds"
+date: "UCSB Spring 2026"
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_float: true
+    css: styles.css
+---
+<br>
+
+<div style="text-align: center;">
+  <img src="images/ReedDuren.png" width="725">
+</div>
+
+<br>
+
+# **Introduction**
+
+The purpose of this project is to develop a machine learning model that predicts NBA player salaries based on their performance during the 2022–2023 season. In this analysis, salary will be treated as a continuous outcome variable, making this a regression problem where the goal is to predict a numeric outcome using a set of predictor variables. These predictors include common box score statistics such as points, assists, rebounds, defensive metrics, and minutes played. By using these variables, this project aims to quantify how player performance translates into financial compensation.
+
+In the National Basketball Association (NBA), teams invest large amounts of money into player contracts with the expectation that higher-performing players will receive higher salaries. These contracts are all meant to fit under certain financial guidelines using a salary cap, which means that there is a finite spending pool to allocate to players on each team across the league. However, a player's performance and their salary are not always closely aligned under the salary cap. Some players appear underpaid relative to their statistical output, while others receive large contracts despite more modest performance. \*\*Cough, cough John Wall** This raises an important question: How well can player box score performance actually explain salary?
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/Salary Money NBA.png" width="500">
+</div>
+
+<br>
+
+This project will explore that question by analyzing player statistics and their relationship to salary. After cleaning and exploring the dataset, a subset of relevant predictor variables will be selected to reduce redundancy and improve interpretability. The data will then be split into training and testing sets, and regression-based models will be used to predict player salary. The results of these models will help evaluate both how accurately salary can be predicted and which performance metrics are most strongly associated with player value.
+
+## **Loading Packages and Data**
+
+The [dataset](https://www.kaggle.com/datasets/jamiewelsh2/nba-player-salaries-2022-23-season/data) used in this project was obtained from Kaggle and contains NBA player statistics and salary information from the 2022–2023 season. The data includes a variety of player performance statistics, such as points, assists, rebounds, shooting percentages, and minutes played, along with each player’s salary for that season. The dataset was downloaded as a CSV file and loaded into R for analysis using the `read.csv()` function.
+
+Citation: Welsh, J. (2023). NBA Player Salaries 2022–23 Season [Data set]. Kaggle. https://www.kaggle.com/datasets/jamiewelsh2/nba-player-salaries-2022-23-season
+```{r, message=FALSE, warning=FALSE}
+# Loading packages
+library(tidymodels)
+tidymodels_prefer()
+library(corrplot) # For EDA correlation plot
+library(glmnet)   # For lasso/elastic net regression
+library(ranger) # Random forest engine
+
+# Making basic chunk options
+
+knitr::opts_chunk$set(
+    echo = TRUE,
+    fig.height = 5,
+    fig.width = 7,
+    message = FALSE,
+    warning = FALSE
+)
+
+# Creating a variable for the data
+nba <- read.csv("nba_2022_stats.csv", stringsAsFactors = FALSE) 
+# Keeping character variables as strings (not factors) to avoid unnecessary factor conversions
+
+set.seed(3434) # Setting specific seed for reproducibility 
+```
+
+# Exploratory Data Analysis
+
+To better understand the relationships between player performance and salary, an exploratory data analysis (EDA) was conducted. This step helps identify patterns, distributions, and potential relationships within the dataset before building any models. Specifically, the analysis focuses on how salary is distributed across players and how it relates to key performance metrics such as scoring.
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/EDA Visual.png" width="550">
+</div>
+
+<br>
+
+## **Checking for Missing Data**
+
+First, let's check our dataset for dimensions and potential missing values!
+
+```{r}
+# Checking dimensions of the dataset
+dim(nba)
+
+# Checking for missing values in each column
+colSums(is.na(nba))
+```
+
+Before conducting further analysis, the structure of the dataset was examined. The dataset contains 467 observations and 52 variables, where each observation represents an individual NBA player from the 2022–2023 season and each variable represents a measured statistic for that player.
+
+In addition to examining the dimensions of the data, missing values were assessed across all of the variables. The output results indicate that most variables contain no missing values, while a small number of variables have minimal missing observations, mostly shooting statistics. These missing values are likely indicators of a player not meeting minimum statistical requirements or simply not having enough minutes played. Because of the relatively small proportion of missing data compared to the overall dataset size, these values are unlikely to significantly impact the analysis and will not require extensive imputation to correct.
+
+It is also important to note a limitation in the dataset related to player inclusion. Preliminary inspection suggests that certain players are excluded due to inconsistencies in name formatting, particularly those with non-ASCII characters or generational suffixes (such as "Jr." or "IV"). This indicates a collection or encoding issue rather than random missingness in the data. Because of this, the dataset may underrepresent certain groups of players (particularly international players such as Nikola Jokić), which could introduce bias into the analysis and limit the generalizability of the results.
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/Jokic Complaining.png" width="620">
+</div>
+
+<br>
+
+## **Visual EDA**
+
+
+### Salary
+Now let's hop into some plots to look at our data. First, let's look at the distribution of the variable we're trying to predict: Salary.
+
+```{r}
+# Plot Title, x-axis label, Fill color, Border color for bars, Remove default x-axis (scientific notation)
+hist(nba$Salary, main = "NBA Player Salaries Distribution", xlab = "Salary (Millions USD)", col = "steelblue", border = "white", xaxt = "n")
+
+# Adding a custom x-axis with more readable labels (millions of dollars)
+# Tick mark positions (actual salary values), Labels shown (in millions)
+axis(1, at = seq(0, 50000000, by = 10000000), labels = seq(0, 50, by = 10))   
+```
+
+The distribution of NBA player salaries is clearly right-skewed. Most players earn relatively low to moderate salaries, while a small number of players earn significantly higher amounts (max/near-max contracts), creating a long tail on the right side of the distribution. These high salaries stand out as outliers compared to the rest of the league. This skewness may make salary more difficult to model directly, as extreme values can influence regression results.
+
+This pattern makes sense in the context of the NBA, where a small group of elite players receive very large contracts compared to the majority of players. These are typically the players that teams view as franchise cornerstones that they can build a competitive roster around. While performance plays a role in salary, other more intangible factors such as experience, reputation, and team decisions may also contribute to the highest salaries.
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/KD Grin.png" width="550">
+</div>
+
+<br>
+
+### Points vs Salary
+To dig a little deeper into how performance relates to salary, we can look at a scatterplot of salary versus points per game. Scoring is one of the most obvious ways players contribute on the court, so it makes sense to check whether players who score more tend to get paid more. This plot helps us see if that relationship actually shows up in the data.
+
+```{r}
+# Scatterplot of Salary vs Points per Game
+plot(nba$PTS, nba$Salary, 
+     xlab = "Points per Game", 
+     ylab = "Salary (Millions USD)", 
+     main = "Salary vs Points per Game",
+     pch = 19,                 # solid circle points
+     col = "steelblue",
+     yaxt = "n")               # remove default y-axis
+
+# Custom y-axis to convert to millions of dollars
+axis(2, at = seq(0, 50000000, by = 10000000), labels = seq(0, 50, by = 10))
+
+# Add line of best fit
+abline(lm(Salary ~ PTS, data = nba), col = "red", lwd = 2)
+
+wall <- subset(nba, Player.Name == "John Wall") # Identifying John Wall outlier
+edwards <- subset(nba, Player.Name == "Anthony Edwards") # Identifying Anthony Edwards outlier
+
+# Highlight John Wall (red)
+points(wall$PTS, wall$Salary, col = "red", pch = 19, cex = 1.45)
+
+# Highlight Anthony Edwards (green)
+points(edwards$PTS, edwards$Salary, col = "darkgreen", pch = 19, cex = 1.45)
+
+# Add labels for both players
+text(wall$PTS, wall$Salary, labels = "John Wall", pos = 4, col = "red")
+text(edwards$PTS, edwards$Salary, labels = "Anthony Edwards", pos = 4, col = "darkgreen")
+```
+
+From this plot, there does seem to be a general positive relationship between points per game and salary. As players score more, their salaries tend to increase, which lines up with the idea that scoring is a major contributor to a player’s value.
+
+That said, the relationship is not perfectly aligned. There is quite a bit of variability, especially in the mid-range of points per game, where players with similar scoring averages can have very different salaries. For example, John Wall appears as a clear outlier, averaging around 12 points per game while earning over 40 million dollars in salary. This reflects the final year of an extremely large long-term contract he signed several years earlier, before injuries significantly impacted his performance.
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/Wall Edwards.png" width="550">
+</div>
+
+<br>
+
+On the other end of the spectrum, there are players scoring over 25 points per game while earning under 10 million dollars. These are players on rookie contracts who have developed faster than expected but have not yet signed larger deals. Anthony Edwards, the number one overall pick from the 2020 NBA draft, is a great example of this. He averaged just under 25 points per game while still being under his standard four-year rookie contract in the 2022-2023 NBA season. This suggests that while scoring is an important factor, it is not the only thing that determines how much a player in the NBA is paid. 
+
+Overall, the presence of these outliers reinforces the idea that factors such as experience, contract timing, and team decisions play a significant role in determining salary. In addition, other performance metrics beyond scoring, such as assists, rebounds, efficiency statistics, and overall playing time, likely contribute to how players are valued, even if those relationships are not captured in this single plot.
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/Mr Barnes.png" width="550">
+</div>
+
+<br>
+
+### Assists + Rebounds vs Salary
+To move beyond scoring, it is useful to look at other ways players contribute on the court. Assists and rebounds are two key statistics that capture playmaking and overall involvement in the game. Players who are viewed as good at playmaking for their teammates and/or cleaning up misses are definitely valued on the court, so let's see if their salaries reflect that. By combining these into a single measure, this plot helps show whether players who contribute more in these areas tend to earn higher salaries.
+
+```{r}
+# Create a combined stat for assists + rebounds
+nba$AR <- (nba$AST + nba$TRB)
+
+# Scatterplot of Salary vs Assists + Rebounds
+plot(nba$AR, nba$Salary,
+     xlab = "Assists + Rebounds per Game",
+     ylab = "Salary (Millions USD)",
+     main = "Salary vs Non-Scoring Production",
+     pch = 19,
+     col = "skyblue",
+     yaxt = "n")
+
+# Custom y-axis in millions of dollars
+axis(2, at = seq(0, 50000000, by = 10000000), labels = seq(0, 50, by = 10))
+
+# Add visual line of best fit
+abline(lm(Salary ~ AR, data = nba), col = "red", lwd = 2)
+```
+
+From this plot, there also appears to be a positive relationship between non-scoring production (assists and rebounds) and salary. As players contribute more in these areas, their salaries generally tend to increase, suggesting that teams do place value on these aspects of performance in addition to scoring.
+
+However, similar to the points per game plot, this relationship is not perfectly consistent. There is still a noticeable amount of variability, especially in the mid-range of assists and rebounds, where players with similar production levels can have very different salaries. This shows that while non-scoring contributions are important, they do not fully explain differences in player compensation.
+
+Compared to the points-per-game plot, the relationship here appears somewhat weaker and more spread out, which may suggest that these types of contributions are valued, but not as heavily weighted as scoring when determining salary. Overall, this reinforces the idea that player salary is influenced by a combination of factors, rather than any single statistic alone.
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/CPass.png" width="550">
+</div>
+
+<br>
+
+### Correlation Plot
+
+To better understand how different aspects of player performance relate to salary, a set of core box score statistics is examined. Points per game (PTS) measures scoring ability, assists per game (AST) capture playmaking and the ability to create opportunities for teammates, and rebounds per game (TRB) reflect a player’s ability to control possession. Minutes played per game (MP) represents a player's overall opportunity to contribute in a game. Additionally, a “stocks” variable, defined as the sum of steals and blocks, is included to represent defensive contributions. These variables were selected because they capture distinct and interpretable dimensions of player performance while avoiding redundancy from more complex, derived metrics.
+
+```{r}
+# Create STOCKS = steals + blocks
+nba$STOCKS <- nba$STL + nba$BLK
+
+# Select key variables to examine
+vars <- nba[, c("Salary", "PTS", "AST", "TRB", "MP", "STOCKS")]
+
+# Compute correlation matrix
+cor_matrix <- cor(vars, use = "complete.obs")
+
+# Display correlation matrix
+cor_matrix
+
+# Correlation plot
+corrplot(cor_matrix, method = "color", addCoef.col = "black", type = "lower", diag = FALSE)
+```
+
+From the correlation matrix, points per game (PTS) has the strongest relationship with salary, with a correlation of 0.73. This supports earlier findings that scoring is a major factor in determining player compensation. Assists (AST) also show a moderately strong correlation with salary (0.59), while rebounds (TRB) and stocks have slightly weaker but still positive relationships, both around 0.50. This suggests that while non-scoring contributions do play a role in salary, they are generally not as influential as scoring.
+
+Minutes played (MP) also shows a relatively strong correlation with salary (0.64), indicating that players who receive more playing time tend to earn more. However, MP is also highly correlated with several other predictors, particularly points per game (0.87), as well as assists, rebounds, and stocks. This suggests that minutes played is closely tied to overall player involvement and opportunity, and may capture similar information to other performance variables.
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/48.png" width="550">
+</div>
+
+<br>
+
+Another important takeaway from the matrix is the presence of moderate to strong correlations between several of the predictor variables themselves. For example, points per game and assists are fairly highly correlated (0.73), indicating that players who score more often tend to be more involved in offensive production overall. Rebounds and stocks also show moderate relationships with the other variables, reflecting that many of these statistics are connected through general on-court activity.
+
+Although some correlation between predictors is expected, this matrix shows that the selected variables are not perfectly redundant and still capture different aspects of player performance. However, due to the strong relationships between minutes played and several other variables, it may not be necessary to include MP in the final model. Instead, a smaller subset of variables will be selected to reduce redundancy while still capturing key dimensions of player performance.
+
+# Modeling
+
+Based on the results of the correlation analysis, a subset of variables was selected for modeling. Points per game (PTS), assists (AST), rebounds (TRB), and stocks (steals + blocks) were chosen because they capture distinct aspects of player performance, including scoring, playmaking, rebounding, and defensive contributions.
+
+Although minutes played (MP) showed a strong relationship with salary, it was excluded from the final model due to its high correlation with other variables, particularly points per game. Including MP alongside these variables could introduce multicollinearity and make the model more difficult to interpret. By focusing on this smaller set of predictors, the model remains interpretable while still capturing key dimensions of player performance that show up in a basic boxscore.
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/rhj model.png" width="550">
+</div>
+
+<br>
+
+## **Training/Testing Data Split and K-Fold Cross-Validation**
+
+Before building any models, the first step is to prepare the dataset and split it into training and testing sets. The training set will be used to fit the models, while the testing set will be used to evaluate how well the models perform on new, unseen data. This helps prevent overfitting, since the model is not being evaluated on the same data it was trained on. Because salary is a continuous variable, stratification is not absolutely necessary in this case. However, it is applied here to ensure that both the training and testing sets contain a similar distribution of salary values.
+
+For this project, an 80/20 split is used, meaning 80% of the data is used for training and 20% is held out for testing. This allows the model to learn from a majority of the data while still leaving enough observations to properly assess performance.
+
+After splitting the data, a modeling recipe will be created to handle preprocessing steps. In addition, 5-fold cross-validation is applied to the training data to evaluate model performance. This involves dividing the training set into five subsets, where the model is trained on four folds and validated on the remaining fold. This process is repeated across all folds, allowing for a more reliable estimate of model performance and helping reduce the risk of overfitting.
+
+```{r}
+# Getting a set of our chosen predictors
+model_data <- nba[, c("Salary", "PTS", "AST", "TRB", "STOCKS")]
+
+# Splitting data into training and testing sets
+splitter <- initial_split(model_data, prop = 0.8, strata = Salary)
+training_data <- training(splitter)
+testing_data <- testing(splitter)
+
+# Creating 5-fold cross-validation on training data
+folds <- vfold_cv(training_data, v = 5, strata = Salary)
+```
+
+## **The Recipe**
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/winningrecipe.png" width="550">
+</div>
+
+<br>
+
+Before fitting any models, I will create a recipe to define how the data will be preprocessed. In this project, all of the selected variables being used are already numeric, so there isn’t much cleaning that needs to be done. However, the predictors are still standardized by centering and scaling them so they are on the same scale. This helps ensure that certain types of models, especially those that rely on penalties, perform more reliably. After this we can get to the modeling process!
+
+```{r}
+# The recipe
+nba_recipe <- recipe(Salary ~ ., data = training_data) %>%
+  step_normalize(all_predictors()) # Centering and scaling predictors
+```
+
+## **Modeling Process**
+
+Before fitting individual models, it is helpful to outline the general process that will be used for each one. For every model in this analysis, the same workflow will be followed:
+\newline
+
+1) The model will be specified and combined with the preprocessing recipe using a workflow. 
+2) The model will be fit using 5-fold cross-validation on the training data to evaluate its overall performance. Model performance is evaluated primarily using RMSE, which here measures the average prediction error in salary (in dollars).
+
+By keeping this process consistent across all the models we test, it becomes easier to fairly compare their relative performance and determine which approach best predicts player salaries. In this analysis, multiple model types will be explored, including linear regression, lasso regression, decision trees, and random forests. These models vary in complexity and flexibility, allowing for a comparison between simpler linear approaches and more flexible, nonlinear methods.
+
+## **The Models**
+### Linear Regression Model
+
+To begin, a linear regression model is used as a baseline. Linear regression models the relationship between a continuous outcome variable (salary) and a set of predictors by fitting a straight-line relationship between them. In this case, the model is attempting to predict player salary based on points, assists, rebounds, and stocks. Starting with a linear regression model provides a simple and interpretable benchmark for our project, allowing us to see how well basic relationships between performance statistics and salary can explain player compensation before we move on to more complex models.
+
+```{r}
+# Specifying linear regression model
+linear_model <- linear_reg() %>%
+  set_engine("lm")
+
+# Creating workflow by combining the model and above recipe
+linear_workflow <- workflow() %>%
+  add_model(linear_model) %>%
+  add_recipe(nba_recipe)
+
+# Fitting the linear regression model using 5-fold cross-validation
+linear_fit <- fit_resamples(
+  linear_workflow,
+  resamples = folds,
+  metrics = metric_set(rmse, rsq)
+)
+
+# Viewing average model performance across folds
+collect_metrics(linear_fit)
+```
+
+5-fold cross-validation was used to evaluate the performance of the linear regression model. The model had an RMSE of approximately 7.3 million dollars, meaning that, on average, the model’s predictions are off by about $7.3 million when estimating player salaries compared to the true value. Also, the model produced an R-squared value of about 0.55, meaning that roughly 55% of the overall variation in player salaries is explained by the selected performance statistics. This suggests that while points, assists, rebounds, and defensive contributions do capture a meaningful portion of player value, a large amount of variation in salary remains unexplained by our model.
+
+Overall, the linear regression model provides a reasonable baseline, but the level of prediction error and unexplained variation suggests that more flexible models may be able to improve performance. Let's try some more!
+
+### Lasso Regression
+
+Next, a lasso regression model is fit. Lasso is a form of regularized regression, meaning it adds a penalty to the model to attempt to reduce overfitting and shrink less useful predictor effects. This is useful for this project because several basketball statistics are somewhat related to each other, so regularization can help make the model more stable. Unlike the standard linear regression model we did previously, lasso has a tuning parameter (the penalty). Different penalty values can lead to different model performance, so the penalty will be tuned using 5-fold cross-validation, which we specified earlier.
+
+```{r}
+# Specifying lasso regression model (with penalty to tune)
+lasso_model <- linear_reg(penalty = tune(), mixture = 1) %>%
+  set_engine("glmnet")
+
+# Combining lasso model and above recipe
+lasso_workflow <- workflow() %>%
+  add_model(lasso_model) %>%
+  add_recipe(nba_recipe)
+
+# Creating grid of penalty values to test (used to find the best tuning parameter)
+lasso_penalty_grid <- grid_regular(
+  penalty(range = c(-4, 1)),
+  levels = 50
+)
+
+# Tuning our lasso model using 5-fold cross-validation
+lasso_tuning <- tune_grid(
+  lasso_workflow,
+  resamples = folds,
+  grid = lasso_penalty_grid,
+  metrics = metric_set(rmse, rsq)
+)
+
+# Viewing  best lasso tuning results
+show_best(lasso_tuning, metric = "rmse")
+
+# Selecting best lasso model based on lowest RMSE
+best_lasso_met <- select_best(lasso_tuning, metric = "rmse")
+best_lasso_met
+```
+
+5-fold cross-validation was used to tune the lasso regression model across a range of penalty parameters. The most optimal penalty value was found to be very small (about 0.0001), meaning that very minimal regularization was applied to the model. In terms of performance, the lasso model produced an RMSE of about 7.29 million dollars. This result nearly identical to the RMSE of the baseline linear regression model! This suggests that regularization does not meaningfully improve predictive performance in this case.
+
+```{r}
+# Plot to show lasso penalty tuning results
+autoplot(lasso_tuning) +
+  labs(
+    title = "Lasso Regression Tuning Results Plot",
+    x = "Penalty Parameter",
+    y = "Performance Metric"
+  ) +
+  scale_x_log10() +
+  theme_minimal()
+```
+
+The above lasso regression tuning plot shows how model performance changes across different penalty values. Interestingly enough, both RMSE and R-squared remain nearly constant throughout the tuning process, suggesting that changing the penalty strength has little impact on predictive performance for this dataset. This likely occurs because the final model already has a small number of predictors. As a result, the lasso penalty is not majorly shrinking or removing variables, causing the model to behave similarly to a standard linear regression model across most penalty values.
+
+### Decision Tree
+
+To throw in a less linear model, a decision tree model is fit. Unlike linear regression and lasso, a decision tree does not assume a straight-line relationship between the predictors and salary. Instead, it splits the data into condensed groups based on predictor values, which can help capture more flexible patterns in the data. Because decision trees can easily overfit, the model will again be tuned using 5-fold cross-validation. The main tuning parameters are tree depth, cost complexity, and minimum number of observations needed to split a node.
+
+```{r}
+# Specifying decision tree model (with tuning parameters)
+dec_tree_mod <- decision_tree(
+  tree_depth = tune(),
+  cost_complexity = tune(),
+  min_n = tune()
+) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
+# Combining the tree model and recipe
+dec_tree_workflow <- workflow() %>%
+  add_model(dec_tree_mod) %>%
+  add_recipe(nba_recipe)
+
+# Creating grid of tuning values
+dec_tree_grid <- grid_regular(
+  tree_depth(range = c(1, 10)),
+  cost_complexity(range = c(-4, -1)),
+  min_n(range = c(2, 20)),
+  levels = 5
+)
+
+# Tuning decision tree using 5-fold cross-validation
+dec_tree_tuning <- tune_grid(
+  dec_tree_workflow,
+  resamples = folds,
+  grid = dec_tree_grid,
+  metrics = metric_set(rmse, rsq)
+)
+
+# Show best tree results based on RMSE
+show_best(dec_tree_tuning, metric = "rmse")
+
+# Select best decision tree model based on lowest RMSE
+best_dec_tree <- select_best(dec_tree_tuning, metric = "rmse")
+best_dec_tree
+```
+
+The decision tree model was tuned using 5-fold cross-validation across a range of hyperparameters, including tree depth, cost complexity, and minimum node size. The best-performing model had a tree depth of 3, a minimum node size of 11, and a very small cost complexity value. This model achieved an RMSE of approximately 6.81 million dollars, which is better than both the linear regression and lasso models we did previously. This suggests that allowing for nonlinear relationships between predictors and salary improves predictive performance. The relatively small tree depth signifies that the model captures a few key splits in the data rather than building a highly complex structure like some other datasets may require.
+
+```{r}
+# Plot to show decision tree tuning results
+autoplot(dec_tree_tuning) +
+  labs(
+    title = "Decision Tree Tuning Results",
+    x = "Cost Complexity Parameter",
+    y = "Performance Metric"
+  ) +
+  scale_x_log10() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The decision tree tuning plot shows how our model performance changes across different combinations of tree depth, cost complexity, and minimum node size. The plot suggests that medium-sized trees in general produce the best performance. In particular, trees with a depth around 3 consistently achieve lower RMSE values than deeper or more simple trees. This implies that allowing the model to capture some nonlinear structure improves prediction accuracy, but overly complex trees may begin to overfit on the data.
+
+### Random Forest Model
+
+Finally, a random forest model is fit. A random forest builds onto the idea of a decision tree (our previous model) by combining many trees together to improve predictive performance. Instead of relying on a singlular tree, the model averages the predictions from multiple trees, which helps improve stability. The main tuning parameter is the number of predictors considered at each split, which controls how the trees are constructed and how much randomness is introduced into the model.
+
+```{r}
+# Specifying random forest model (with tuning parameters)
+randomfor_model <- rand_forest(
+  mtry = tune(),   # The number of predictors the model considers at each split
+  min_n = tune(),  # The minimum observations needed to split a node
+  trees = 500      # The number of trees total in the forest
+) %>%
+  set_engine("ranger") %>%
+  set_mode("regression") 
+
+# Combining random forest model and the recipe
+randomfor_workflow <- workflow() %>%
+  add_model(randomfor_model) %>%
+  add_recipe(nba_recipe)
+
+# Grid of tuning values
+randomfor_grid <- grid_regular(
+  mtry(range = c(1, 4)),   # 4 predictors total from our model
+  min_n(range = c(2, 20)),
+  levels = 5
+)
+
+# Tuning random forest model using 5-fold cross-validation
+randomfor_tune <- tune_grid(
+  randomfor_workflow,
+  resamples = folds,
+  grid = randomfor_grid,
+  metrics = metric_set(rmse, rsq)
+)
+
+# Showing best random forest results (based on RMSE)
+show_best(randomfor_tune, metric = "rmse")
+
+# Selecting best random forest model
+best_randomforest <- select_best(randomfor_tune, metric = "rmse")
+best_randomforest
+```
+
+The random forest model was tuned using 5-fold cross-validation across different values of "mtry" and "min_n". The best-performing random forest used "mtry = 1" and "min_n = 20", obtaining an RMSE of about 7.15 million dollars.
+
+This represents a slight improvement on our linear regression and lasso models, but it does not outperform the decision tree model. This implies that while the random forest provides a more flexible approach than linear models, the fact we only use four predictors may limit how much additional predictive power it can gain from combining many trees over using just one.
+
+```{r}
+# Plot to show random forest tuning results
+autoplot(randomfor_tune) +
+  labs(title = "Random Forest Tuning Results")
+```
+
+The random forest tuning plot shows how predictive performance changes across different values of "mtry" and minimum node size. Lower values of "mtry", which introduce more randomness into the forest, generally produce the best performance. Even though the random forest model improves slightly over the linear and lasso models, it does not perfrom better than our decision tree model.
+
+## **Model Comparison**
+
+After fitting and tuning each model, the models can now be directly compared using RMSE and R-squared values. Since RMSE measures the average prediction error in our outcome variable salary, lower RMSE values indicate better predictive performance. Comparing the models side-by-side helps determine which modeling approach most accurately predicts NBA player salaries for this dataset, so we'll visualize this with a bar chart.
+
+```{r}
+# Creating dataframe to store results
+results_df <- data.frame(
+  Models = c("Linear Regression",
+            "Lasso Regression",
+            "Decision Tree",
+            "Random Forest"),
+  
+  RMSE = c(7292966,
+           7292460,
+           6805974,
+           7154935)
+)
+
+# Bar chart looking at RMSE's for each model
+ggplot(results_df, aes(x = Models, y = RMSE)) +
+  geom_col(fill = "red") +
+  
+  geom_text(
+    aes(label = round(RMSE, 0)),
+    vjust = -0.3,
+    size = 4
+  ) +
+  
+  labs(
+    title = "RMSE Comparison Across Our Models",
+    x = "Model Type",
+    y = "RMSE"
+  ) +
+  
+  theme_minimal() +
+  
+  theme(
+    axis.text.x = element_text(angle = 15, hjust = 1)
+  )
+```
+
+Among the four models tested, the decision tree model achieved the lowest RMSE, indicating the strongest predictive performance on the training data during cross-validation. While the random forest model improved slightly over the linear and lasso regression models, it did not outperform the decision tree model. The superior performance of the decision tree suggests that nonlinear relationships may exist between player performance metrics and salary. Overall, the decision tree model appears to provide the best balance between predictive performance and interpretability, making it the strongest candidate for final evaluation on the testing dataset.
+
+## **Final Model Evaluation**
+
+After comparing the performance of all four models, the decision tree achieved the lowest cross-validated RMSE and was therefore selected as the final model for evaluation on the testing set. To evaluate how well this model generalizes to new data, the best-performing decision tree is fit to the entire training set and then evaluated on the testing set, which has remained untouched so far throughout our project.
+
+```{r}
+# Finalizing decision tree workflow with best tuning parameters
+final_dec_tree_workflow <- finalize_workflow(dec_tree_workflow, best_dec_tree)
+
+# Fitting finalized model to our full training dataset
+final_dec_tree_fit <- fit(final_dec_tree_workflow, data = training_data)
+
+# Generating predictions on our testing data
+dec_tree_predictions <- augment(final_dec_tree_fit, new_data = testing_data)
+
+# Evaluating performance by collecting metrics
+metric_set(rmse, rsq)(dec_tree_predictions,
+  truth = Salary, estimate = .pred)
+```
+
+The finalized decision tree model achieved a testing RMSE of approximately $8.07 million and an R-squared value of 0.411. This means that, on average, the model's salary predictions were off by about $8 million, while approximately 41.1% of the variation in player salaries was explained by the model. Given that NBA salaries range from under 1 million dollars to over 50 million dollars, a testing RMSE of approximately $8 million suggests moderate predictive accuracy but also highlights the difficulty of explaining player salaries using box score statistics alone.
+
+Compared to the cross-validation results obtained during tuning, the testing performance was somewhat worse. The best decision tree achieved a cross-validated RMSE of around 6.81 million dollars, but the testing RMSE increased to just over $8 million. Similarly, the R-squared value went down from about 0.60 during tuning to 0.41 on the testing set. This shows that while the model successfully captured some of the relationship between player performance and salary, its predictive ability did not generalize extremely well to the new data in the testing set. These results highlight that NBA salaries are influenced by several factors outside the box score statistics included in this analysis. Age, contract timing, draft position, injuries, and team-specific financial decisions all come to mind as aspects in this regard. We use an actual vs. predicted plot to visualize how our final decision tree model performed on the testing set.
+
+```{r}
+# Actual vs. Predicted plot
+ggplot(dec_tree_predictions, aes(x = Salary, y = .pred)) +
+  geom_point(color = "steelblue", alpha = 0.7) +
+  
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    color = "red",
+    linewidth = 1
+  ) +
+  
+  labs(
+    title = "Predicted vs Actual Salary",
+    x = "Actual Salary", y = "Predicted Salary"
+  ) +
+  theme_minimal()
+```
+
+While there exists a clear positive relationship between actual and predicted salaries, many observations deviate from the 45-degree reference line, indicating some prediction error. In particular, the model tends to underpredict some of the league's highest-paid players, suggesting that factors beyond the box score statistics included in this analysis contribute to salary determination. The horizontal bands visible in the plot are a natural result given the decision tree structure, which assigns the same prediction to all observations within a terminal node. Overall, the plot supports the testing metrics results, showing that the model captures broad salary patterns but is not able to fully explain all of the variation present in NBA player contracts.
+
+# Conclusion
+
+The goal of this project was to determine whether NBA player salaries can be predicted using basic player performance statistics from the 2022–2023 NBA season. Through exploratory data analysis, several performance measures were found to be positively associated with salary (points per game, assists, rebounds, and stocks). These variables were selected as predictors and used to fit four different machine learning models: linear regression, lasso regression, a decision tree, and a random forest. Model performance was evaluated using 5-fold cross-validation and compared primarily using the RMSE metric.
+
+Among the four models, the decision tree produced the lowest cross-validated RMSE and was selected as the final model. When applied to the testing set, the decision tree achieved an RMSE of approximately $8.1 million and an R-squared value of 0.41. While these results indicate that player statistics contain some meaningful information about salary, they also suggest that a substantial portion of salary variation is driven by factors not included in the examined dataset. Variables such as age, years of experience in the NBA, draft position, injury history, and team-specific circumstances may all influence player compensation beyond on-court box score production alone.
+
+Overall, the results demonstrate that NBA salaries are partially predictable using basic box score statistics, but no model was able to perfectly capture the complexity of player contracts. Future work could incorporate additional player and contract-related variables, explore more advanced performance metrics, or test more sophisticated modeling approaches. Predictive accuracy may improve from doing one or more of those and provide a more complete understanding of the factors that contribute to NBA player salaries. It looks like it's not all about scoring points if you want to get paid in today's NBA.
+
+<br>
+
+<div style="text-align: center;">
+  <img src="images/wade.png" width="550">
+</div>
+
+<br>
